@@ -1,0 +1,152 @@
+#!/usr/bin/env python
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+SWIFT_MOUNT = "/srv/node"
+BIN_DEPS = ["egrep", "sgdisk", "mkfs.xfs", "which", "mount", "partprobe"]
+
+TEMPLATE = {}
+TEMPLATE["check_device_fstab"] = "egrep ^{} /etc/fstab"
+TEMPLATE["check_device_mounted"] = "mount | egrep ^{}"
+TEMPLATE["clear_drive"] = "sgdisk -z {}"
+TEMPLATE["first_sector"] = "sgdisk -F {}"
+TEMPLATE["format_device"] = "mkfs.xfs -f -i size=1024 {}1"
+TEMPLATE["last_sector"] = "sgdisk -E {}"
+TEMPLATE["create_partition"] = "sgdisk -n {}:{}:{} {}"
+TEMPLATE["which"] = "which {}"
+TEMPLATE["zap_device"] = "sgdisk -Z {}"
+
+class LocalError(Exception):
+    def __init__(self, value):
+        self.value = value
+    def __str__(self):
+        return repr(self.value)
+
+class BinaryMissingError(LocalError):
+    pass
+
+class DeviceDoesNotExistError(LocalError):
+    pass
+
+class DeviceExistsInFstabError(LocalError):
+    pass
+
+class DeviceMountedError(LocalError):
+    pass
+
+class FormatDeviceError(LocalError):
+    pass
+
+class NotRawDeviceError(LocalError):
+    pass
+
+class PartitionDeviceError(LocalError):
+    pass
+
+class PartprobeError(LocalError):
+    pass
+
+class SgdiskUnexpectedOutputError(LocalError):
+    pass
+
+class ZapDeviceError(LocalError):
+    pass
+
+def check_device_exists(device):
+    if os.path.exists(device) == False:
+        raise DeviceDoesNotExistError(arg)    
+
+def check_device_fstab_absent(device):
+    fstab = TEMPLATE["check_device_fstab"]
+    if subprocess.call(fstab.format(device), shell=True) == 0:
+        raise DeviceExistsInFstabError(device)
+
+def check_device_unmounted(device):
+    mounted = TEMPLATE["check_device_mounted"]
+    if subprocess.call(mounted.format(device), shell=True) == 0:
+        raise DeviceMountedError(device)
+
+def check_raw_device(device):
+    if list(device)[-1].isdigit():
+        sys.stderr.write("Device must be a raw drive, not a partition.\n")
+        raise NotRawDeviceError(device)
+
+def dependency_check(deps):
+    which = TEMPLATE["which"]
+    for d in deps:
+        if subprocess.call(which.format(d), shell=True) != 0:
+            raise BinaryMissingError(d)
+
+def format_device(device):
+    f = TEMPLATE["format_device"]
+    if subprocess.call(f.format(device), shell=True) != 0:
+        raise FormatDeviceError(device)
+
+def get_first_sector(device):
+    f = TEMPLATE["first_sector"]
+    output = subprocess.check_output(f.format(device), shell=True).rstrip()
+    sector = output.split("\n")[-1].rstrip()
+    try:
+        int(sector)
+    except:
+        raise SgdiskUnexpectedOutputError(output)
+
+    return sector
+
+def get_last_sector(device):
+    l = TEMPLATE["last_sector"]
+    output = subprocess.check_output(l.format(device), shell=True).rstrip()
+    sector = output.split("\n")[-1].rstrip()
+    try:
+        int(sector)
+    except:
+        raise SgdiskUnexpectedOutputError(output)
+
+    return sector
+
+def partition_device(**kwargs):
+    first = kwargs['first']
+    last = kwargs['last']
+    num = kwargs['num']
+    dev = kwargs['dev']
+
+    p = TEMPLATE["create_partition"]
+    if subprocess.call(p.format(num, first, last, dev), shell=True) != 0:
+       raise PartitionDeviceError(dev)
+
+def partprobe():
+    if subprocess.call("partprobe", shell=True) != 0:
+        raise PartprobeError()
+
+def zap_device(device):
+    zap = TEMPLATE["zap_device"]
+    if subprocess.call(zap.format(device), shell=True) != 0:
+        raise ZapDeviceError
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("device", 
+            help="select device to destructively prepare for use in a Swift cluster")
+    args = parser.parse_args()
+    device = args.device
+
+    dependency_check(BIN_DEPS)
+    partprobe()
+    check_raw_device(device)
+    check_device_exists(device)
+    check_device_unmounted(device)
+    check_device_fstab_absent(device)
+    zap_device(device)
+    partprobe()
+    first_sector = get_first_sector(device)
+    last_sector = get_last_sector(device)
+    partition_device(num=1, first=first_sector, last=last_sector, dev=device)
+    partprobe()
+    format_device(device)
+
+if __name__ == "__main__":
+    main()
